@@ -3,6 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#DCE7FE" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Catatan Keuangan" />
+  <link id="pwa-manifest-link" rel="manifest" />
+  <link id="pwa-apple-icon" rel="apple-touch-icon" />
   <title>Catatan Keuangan — Personal Finance Tracker</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -83,12 +90,12 @@
     <!-- Lock Screen Overlay (PIN / Password Kunci Aplikasi) -->
     <div id="lock-screen" class="fixed inset-0 z-[90] hidden items-center justify-center p-5 bg-[#FAF8F5]/95 backdrop-blur-md">
       <div class="w-full max-w-sm bg-white rounded-3xl p-6 shadow-xl border border-[#DDD6FE] space-y-5 text-center">
-        <div class="w-12 h-12 rounded-2xl bg-[#F4F1FE] text-[#5B21B6] mx-auto flex items-center justify-center text-lg font-extrabold">
+        <div class="w-12 h-12 rounded-2xl bg-[#EAE4FD] text-[#5B21B6] mx-auto flex items-center justify-center text-lg font-extrabold">
           🔒
         </div>
         <div>
           <h2 class="text-lg font-extrabold text-ink">Aplikasi Terkunci</h2>
-          <p class="text-xs text-slate-500 mt-1">Masukkan PIN / password Anda untuk membuka catatan keuangan</p>
+          <p class="text-xs text-slate-500 mt-1">Sesi tidak aktif selama lebih dari 2 hari atau dikunci manual. Masukkan PIN / password Anda.</p>
         </div>
 
         <form onsubmit="submitUnlockApp(event)" class="space-y-3.5 text-left">
@@ -186,6 +193,7 @@
       SGD: { symbol: 'S$', name: 'Dolar Singapura', decimals: 2 },
       EUR: { symbol: '€', name: 'Euro', decimals: 2 },
       JPY: { symbol: '¥', name: 'Yen Jepang', decimals: 0 },
+      THB: { symbol: '฿', name: 'Baht Thailand', decimals: 2 },
       MYR: { symbol: 'RM', name: 'Ringgit Malaysia', decimals: 2 },
       SAR: { symbol: 'SAR', name: 'Riyal Saudi', decimals: 2 },
       GBP: { symbol: '£', name: 'Pound Inggris', decimals: 2 },
@@ -205,7 +213,8 @@
       return {
         security: {
           enabled: false,
-          pinHash: null
+          pinHash: null,
+          lastActiveAt: Date.now()
         },
         exchangeRates: {
           IDR: 1,
@@ -213,6 +222,7 @@
           SGD: 11850,
           EUR: 17100,
           JPY: 105,
+          THB: 465,
           MYR: 3620,
           SAR: 4220,
           GBP: 20150,
@@ -643,7 +653,89 @@
 
     let db = loadData();
     let isFetchingRates = false;
-    let isAppUnlocked = false;
+    const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+    let isManualLocked = false;
+    let deferredInstallPrompt = null;
+
+    function initPwaSupport() {
+      try {
+        const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="120" fill="#2E7D5B"/><g fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"><path d="M184 112h144"/><path d="M202 112v42a84 84 0 0 0-56 79v132a48 48 0 0 0 48 48h124a48 48 0 0 0 48-48V233a84 84 0 0 0-56-79v-42"/><path d="M220 212h72"/><circle cx="256" cy="306" r="44"/></g></svg>`;
+        const iconDataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(iconSvg);
+        const appleIconEl = document.getElementById('pwa-apple-icon');
+        if (appleIconEl) appleIconEl.href = iconDataUrl;
+
+        const manifest = {
+          name: 'Catatan Keuangan',
+          short_name: 'Keuangan',
+          description: 'Catatan Keuangan Pribadi, Multi-Pocket, Tabungan & Valas',
+          start_url: './',
+          display: 'standalone',
+          background_color: '#FAF8F5',
+          theme_color: '#DCE7FE',
+          icons: [
+            { src: iconDataUrl, sizes: '192x192', type: 'image/svg+xml', purpose: 'any maskable' },
+            { src: iconDataUrl, sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }
+          ]
+        };
+        const manifestBlob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+        const manifestUrl = URL.createObjectURL(manifestBlob);
+        const manifestEl = document.getElementById('pwa-manifest-link');
+        if (manifestEl) manifestEl.href = manifestUrl;
+
+        if ('serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
+          const swCode = `
+            self.addEventListener('install', (e) => self.skipWaiting());
+            self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+            self.addEventListener('fetch', (e) => {
+              e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+            });
+          `;
+          const swBlob = new Blob([swCode], { type: 'application/javascript' });
+          const swUrl = URL.createObjectURL(swBlob);
+          navigator.serviceWorker.register(swUrl).catch(() => {});
+        }
+      } catch (e) {
+        console.warn('PWA init skipped:', e);
+      }
+    }
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      if (ui.activeTab === 'pengaturan') render();
+    });
+
+    async function triggerInstallApp() {
+      if (deferredInstallPrompt) {
+        deferredInstallPrompt.prompt();
+        const choice = await deferredInstallPrompt.userChoice;
+        if (choice && choice.outcome === 'accepted') {
+          showToast('Aplikasi sedang dipasang ke layar utama HP');
+        }
+        deferredInstallPrompt = null;
+        render();
+      } else {
+        openModal(`
+          <div class="space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-lg font-extrabold text-ink">Install ke Layar Utama HP</h3>
+              <button onclick="closeModal()" class="p-1.5 rounded-full bg-stone-100 text-slate-500">✕</button>
+            </div>
+            <div class="space-y-3 text-xs text-slate-600 leading-relaxed">
+              <div class="bg-[#DCE7FE]/60 p-3.5 rounded-2xl border border-[#B9CEFC]">
+                <div class="font-extrabold text-ink mb-1">📱 Android (Google Chrome):</div>
+                <p>Ketuk ikon <strong>titik tiga (⋮)</strong> di pojok kanan atas Chrome → pilih <strong>"Tambahkan ke Layar utama"</strong> atau <strong>"Install aplikasi"</strong>.</p>
+              </div>
+              <div class="bg-[#D0EAD9]/60 p-3.5 rounded-2xl border border-[#A8D5B9]">
+                <div class="font-extrabold text-ink mb-1">🍎 iPhone / iPad (Safari):</div>
+                <p>Ketuk tombol <strong>Bagikan (Share ⍗)</strong> di bagian bawah Safari → gulir ke bawah dan pilih <strong>"Tambah ke Layar Utama" (Add to Home Screen)</strong>.</p>
+              </div>
+            </div>
+            <button onclick="closeModal()" class="w-full py-3 rounded-2xl bg-ink text-white text-xs font-bold">Mengerti</button>
+          </div>
+        `);
+      }
+    }
 
     function hashPin(pin) {
       // Hash deterministik sederhana berbasis FNV-1a agar PIN tidak disimpan dalam bentuk teks polos
@@ -656,8 +748,25 @@
       return 'pin_' + (h >>> 0).toString(16);
     }
 
+    function checkSessionExpiration() {
+      if (!db.security || !db.security.enabled || !db.security.pinHash) return false;
+      if (isManualLocked) return true;
+      const lastActive = Number(db.security.lastActiveAt) || 0;
+      if (lastActive === 0 || (Date.now() - lastActive) > TWO_DAYS_MS) {
+        return true;
+      }
+      return false;
+    }
+
+    function touchLastActive() {
+      if (db.security && db.security.enabled && !isPinRequired()) {
+        db.security.lastActiveAt = Date.now();
+        saveData();
+      }
+    }
+
     function isPinRequired() {
-      return Boolean(db.security && db.security.enabled && db.security.pinHash && !isAppUnlocked);
+      return checkSessionExpiration();
     }
 
     function updateLockScreenVisibility() {
@@ -685,10 +794,12 @@
       const err = document.getElementById('lock-error-msg');
       const entered = (inp?.value || '').trim();
       if (db.security && hashPin(entered) === db.security.pinHash) {
-        isAppUnlocked = true;
+        isManualLocked = false;
+        db.security.lastActiveAt = Date.now();
+        saveData();
         if (err) err.classList.add('hidden');
         updateLockScreenVisibility();
-        showToast('Aplikasi terbuka');
+        showToast('Aplikasi terbuka (aktif selama 2 hari ke depan)');
       } else {
         if (err) err.classList.remove('hidden');
         if (inp) {
@@ -703,7 +814,7 @@
         openPinSetupModal();
         return;
       }
-      isAppUnlocked = false;
+      isManualLocked = true;
       updateLockScreenVisibility();
       showToast('Aplikasi dikunci');
     }
@@ -783,12 +894,13 @@
 
       db.security = {
         enabled: true,
-        pinHash: hashPin(newPin)
+        pinHash: hashPin(newPin),
+        lastActiveAt: Date.now()
       };
-      isAppUnlocked = true;
+      isManualLocked = false;
       saveData();
       closeModal();
-      showToast('PIN / password kunci aplikasi berhasil disimpan');
+      showToast('PIN disimpan (otomatis terbuka selama rutin dipakai, terkunci jika >2 hari tidak dibuka)');
       render();
     }
 
@@ -800,9 +912,10 @@
       }
       db.security = {
         enabled: false,
-        pinHash: null
+        pinHash: null,
+        lastActiveAt: Date.now()
       };
-      isAppUnlocked = true;
+      isManualLocked = false;
       saveData();
       closeModal();
       updateLockScreenVisibility();
@@ -1093,28 +1206,28 @@
 
       return `
         <div class="p-4 space-y-4">
-          <!-- Top Header & Period Switcher (Soft Lavender Pastel) -->
-          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #F4F1FE; border-color: #DDD6FE;">
+          <!-- Top Header & Period Switcher (Medium-Soft Lavender Pastel) -->
+          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #E7E0FC; border-color: #C9B9F8;">
             <div class="flex items-center justify-between gap-2 mb-3">
               <div>
                 <h1 class="text-lg font-extrabold text-ink tracking-tight">Statistik & Anggaran</h1>
-                <p class="text-xs text-slate-600">Pantau evaluasi limit dan arus pengeluaran</p>
+                <p class="text-xs text-slate-700">Pantau evaluasi limit dan arus pengeluaran</p>
               </div>
               <!-- Toggle Bulanan / Tahunan -->
-              <div class="bg-white/90 p-1 rounded-xl flex text-xs font-semibold border border-[#DDD6FE]/70">
+              <div class="bg-white/90 p-1 rounded-xl flex text-xs font-semibold border border-[#C9B9F8]">
                 <button onclick="setStatPeriodMode('monthly')" class="px-2.5 py-1.5 rounded-lg transition-all ${ui.statPeriodMode === 'monthly' ? 'bg-ink text-white shadow-sm' : 'text-slate-600'}">Bulanan</button>
                 <button onclick="setStatPeriodMode('yearly')" class="px-2.5 py-1.5 rounded-lg transition-all ${ui.statPeriodMode === 'yearly' ? 'bg-ink text-white shadow-sm' : 'text-slate-600'}">Tahunan</button>
               </div>
             </div>
 
             <!-- Navigator Periode & Sub-tab Switcher -->
-            <div class="flex items-center justify-between pt-2 border-t border-[#DDD6FE]/70">
-              <div class="flex items-center gap-1 bg-white/90 px-2 py-1 rounded-xl border border-[#DDD6FE]">
-                <button onclick="shiftPeriod('stat', -1)" class="p-1.5 hover:bg-[#F4F1FE] rounded-lg text-slate-600">
+            <div class="flex items-center justify-between pt-2 border-t border-[#C9B9F8]">
+              <div class="flex items-center gap-1 bg-white/90 px-2 py-1 rounded-xl border border-[#C9B9F8]">
+                <button onclick="shiftPeriod('stat', -1)" class="p-1.5 hover:bg-[#E7E0FC] rounded-lg text-slate-600">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
                 </button>
                 <span class="text-xs font-bold text-ink min-w-[76px] text-center">${periodLabel}</span>
-                <button onclick="shiftPeriod('stat', 1)" class="p-1.5 hover:bg-[#F4F1FE] rounded-lg text-slate-600">
+                <button onclick="shiftPeriod('stat', 1)" class="p-1.5 hover:bg-[#E7E0FC] rounded-lg text-slate-600">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
                 </button>
               </div>
@@ -1145,211 +1258,9 @@
       render();
     }
 
-    // -------------------------------------------------------------------------
-    // 5A. EVALUASI ANGGARAN (SESUAI GAMBAR 1)
-    // -------------------------------------------------------------------------
-    function renderBudgetEvaluationSection() {
-      const expenseCats = db.categories.filter(c => c.type === 'expense');
-      const periodTxs = filterTransactionsByPeriod(db.transactions, ui.statPeriodMode, ui.statYear, ui.statMonth)
-        .filter(t => t.type === 'expense');
-
-      const multiplier = ui.statPeriodMode === 'yearly' ? 12 : 1;
-
-      let totalBudgetAll = 0;
-      let totalSpentAll = 0;
-
-      const cardsData = expenseCats.map(cat => {
-        const monthlyLimit = getCategoryLimit(cat);
-        const totalLimit = monthlyLimit * multiplier;
-        const catTxs = periodTxs.filter(t => t.categoryId === cat.id);
-        const spent = catTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-
-        totalBudgetAll += totalLimit;
-        totalSpentAll += spent;
-
-        const subItems = (cat.subcategories || []).map(sub => {
-          const subLimit = (Number(sub.limit) || 0) * multiplier;
-          const subSpent = catTxs
-            .filter(t => t.subcategoryId === sub.id)
-            .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-          const subPct = subLimit > 0 ? Math.round((subSpent / subLimit) * 100) : (subSpent > 0 ? 100 : 0);
-          return { ...sub, limit: subLimit, spent: subSpent, pct: subPct };
-        });
-
-        const pct = totalLimit > 0 ? Math.round((spent / totalLimit) * 100) : (spent > 0 ? 100 : 0);
-        return { cat, totalLimit, spent, pct, subItems };
-      });
-
-      const overallPct = totalBudgetAll > 0 ? Math.round((totalSpentAll / totalBudgetAll) * 100) : 0;
-
-      return `
-        <div class="bg-white rounded-3xl p-4 sm:p-5 shadow-sm border border-stone-200/70 space-y-4">
-          <!-- Header Evaluasi Anggaran -->
-          <div class="flex items-start justify-between gap-2">
-            <div>
-              <h2 class="text-xl font-extrabold text-ink tracking-tight">Evaluasi Anggaran</h2>
-              <p class="text-xs text-slate-500 mt-0.5">
-                Terpakai <span class="font-bold text-ink">${overallPct}%</span> dari total <span class="font-bold text-ink">${formatCurrency(totalBudgetAll)}</span>
-              </p>
-              ${ui.statPeriodMode === 'yearly' ? `<span class="inline-block mt-1 text-[10px] font-semibold bg-amber-50 text-amber-700 px-2 py-0.5 rounded-md border border-amber-200">Akumulasi Limit Tahunan (12 Bulan)</span>` : ''}
-            </div>
-            <button onclick="openBulkBudgetModal()" class="px-3.5 py-2 rounded-2xl bg-creamCard hover:bg-stone-200/70 text-ink text-xs font-bold border border-stone-200/80 transition-all active:scale-95 shrink-0">
-              Atur Budget
-            </button>
-          </div>
-
-          <!-- Daftar Kartu Kategori Anggaran -->
-          <div class="space-y-3.5">
-            ${cardsData.map(item => {
-              const hasSubs = item.subItems.length > 0;
-              const isExpanded = !!ui.expandedBudgetCats[item.cat.id];
-              const badge = getBudgetBadge(item.pct, item.totalLimit);
-              const barWidth = Math.min(item.pct, 100);
-              const barColor = item.pct > 100 ? 'bg-coral' : item.pct >= 80 ? 'bg-amber-500' : 'bg-sage';
-
-              return `
-                <div class="bg-creamCard rounded-2xl p-4 border border-stone-200/70 transition-all">
-                  <!-- Baris Judul & Status Badge -->
-                  <div class="flex items-center justify-between gap-2">
-                    <button onclick="${hasSubs ? `toggleBudgetExpand('${item.cat.id}')` : `openCategoryDrilldown('${item.cat.id}')`}"
-                      class="flex items-center gap-2 text-left group">
-                      <span class="text-[15px] font-bold text-ink group-hover:text-sage transition-colors">${item.cat.name}</span>
-                      ${hasSubs ? `
-                        <span class="text-stone-500 text-xs transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}">
-                          ▼
-                        </span>
-                      ` : ''}
-                    </button>
-                    <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${badge.cls}">
-                      ${badge.label} (${item.pct}%)
-                    </span>
-                  </div>
-
-                  <!-- Baris Nominal Terpakai / Limit & Edit Limit -->
-                  <div class="flex items-center justify-between mt-2">
-                    <div class="text-xs">
-                      <span class="font-extrabold text-ink text-sm">${formatCurrency(item.spent)}</span>
-                      <span class="text-slate-400 mx-1">/</span>
-                      <span class="text-slate-500 font-medium">${formatCurrency(item.totalLimit)}</span>
-                    </div>
-                    <button onclick="openEditCategoryLimitModal('${item.cat.id}')" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 rounded-lg hover:bg-blue-50 transition-colors">
-                      Edit Limit
-                    </button>
-                  </div>
-
-                  <!-- Progress Bar -->
-                  <div class="w-full h-2 bg-stone-200/80 rounded-full overflow-hidden mt-2.5">
-                    <div class="h-full ${barColor} rounded-full transition-all duration-300" style="width: ${barWidth}%"></div>
-                  </div>
-
-                  <!-- Subkategori Expandable Section -->
-                  ${hasSubs && isExpanded ? `
-                    <div class="mt-3.5 pt-3 border-t border-stone-200/80 space-y-3 pl-2.5 border-l-2 border-sage/40">
-                      ${item.subItems.map(sub => {
-                        const subBarColor = sub.pct > 100 ? 'bg-coral' : sub.pct >= 80 ? 'bg-amber-500' : 'bg-sage';
-                        const subBadgeCls = sub.pct > 100 ? 'bg-coralLight text-coral' : sub.pct >= 80 ? 'bg-amber-100 text-amber-800' : 'bg-[#DDF2D1] text-[#2B6E1F]';
-                        return `
-                          <div class="space-y-1.5">
-                            <div class="flex items-center justify-between">
-                              <span class="text-sm font-bold text-ink">${sub.name}</span>
-                              <div class="flex items-center gap-2">
-                                <span class="px-2 py-0.5 rounded-full text-[11px] font-bold ${subBadgeCls}">${sub.pct}%</span>
-                                <button onclick="openEditSubLimitModal('${item.cat.id}', '${sub.id}')" class="text-xs font-bold text-blue-600 hover:underline">
-                                  Atur
-                                </button>
-                              </div>
-                            </div>
-                            <div class="flex items-center justify-between text-xs">
-                              <div>
-                                <span class="text-slate-500">Terpakai: </span>
-                                <span class="font-bold text-sage">${formatCurrency(sub.spent)}</span>
-                              </div>
-                              <div>
-                                <span class="text-slate-500">Limit: </span>
-                                <span class="font-bold text-ink">${formatCurrency(sub.limit)}</span>
-                              </div>
-                            </div>
-                            <div class="w-full h-1.5 bg-stone-200/80 rounded-full overflow-hidden">
-                              <div class="h-full ${subBarColor} rounded-full" style="width: ${Math.min(sub.pct, 100)}%"></div>
-                            </div>
-                          </div>
-                        `;
-                      }).join('')}
-                    </div>
-                  ` : ''}
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }
-
-    function getBudgetBadge(pct, limit) {
-      if (limit === 0) return { label: 'Tanpa Limit', cls: 'bg-stone-200 text-slate-600' };
-      if (pct > 100) return { label: 'Melebihi', cls: 'bg-coralLight text-coral' };
-      if (pct >= 80) return { label: 'Waspada', cls: 'bg-amber-100 text-amber-800' };
-      return { label: 'Aman', cls: 'bg-[#DDF2D1] text-[#2B6E1F]' };
-    }
-
-    function toggleBudgetExpand(catId) {
+    function toggleBudgetCatExpand(catId) {
       ui.expandedBudgetCats[catId] = !ui.expandedBudgetCats[catId];
       render();
-    }
-
-    // -------------------------------------------------------------------------
-    // 5B. PENGELUARAN PER KATEGORI (RINGKASAN KLIK-UNTUK-DRILLDOWN)
-    // -------------------------------------------------------------------------
-    function renderCategoryBreakdownSection() {
-      const periodTxs = filterTransactionsByPeriod(db.transactions, ui.statPeriodMode, ui.statYear, ui.statMonth)
-        .filter(t => t.type === 'expense');
-
-      const totalExpense = periodTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-
-      const expenseCats = db.categories.filter(c => c.type === 'expense').map(cat => {
-        const spent = periodTxs
-          .filter(t => t.categoryId === cat.id)
-          .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-        const pct = totalExpense > 0 ? Math.round((spent / totalExpense) * 100) : 0;
-        return { cat, spent, pct };
-      }).sort((a, b) => b.spent - a.spent);
-
-      return `
-        <div class="bg-white rounded-3xl p-4 sm:p-5 shadow-sm border border-stone-200/70 space-y-4">
-          <div>
-            <span class="text-xs font-semibold text-slate-400">
-              Total Pengeluaran ${ui.statPeriodMode === 'yearly' ? 'Tahunan' : 'Bulanan'}
-            </span>
-            <div class="text-2xl font-extrabold text-ink mt-0.5">${formatCurrency(totalExpense)}</div>
-            <p class="text-[11px] text-slate-400 mt-1">Ketuk kategori di bawah untuk melihat rincian subkategori & grafik tren</p>
-          </div>
-
-          <div class="divide-y divide-stone-100">
-            ${expenseCats.map((item, idx) => {
-              const pillColors = ['bg-coral', 'bg-amber-500', 'bg-sage', 'bg-blue-500', 'bg-purple-500'];
-              const pillColor = pillColors[idx % pillColors.length];
-              return `
-                <button onclick="openCategoryDrilldown('${item.cat.id}')"
-                  class="w-full py-3.5 flex items-center justify-between gap-3 hover:bg-creamCard/70 px-2 rounded-2xl transition-colors text-left group">
-                  <div class="flex items-center gap-3 min-w-0">
-                    <span class="w-11 text-center py-1 rounded-lg text-white text-xs font-extrabold ${pillColor} shrink-0">
-                      ${item.pct}%
-                    </span>
-                    <div class="truncate">
-                      <div class="text-sm font-bold text-ink group-hover:text-coral transition-colors truncate">${item.cat.name}</div>
-                      <div class="text-[11px] text-slate-400">${item.cat.subcategories?.length || 0} subkategori</div>
-                    </div>
-                  </div>
-                  <div class="flex items-center gap-2 shrink-0">
-                    <span class="text-sm font-extrabold text-ink">${formatCurrency(item.spent)}</span>
-                    <svg class="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
-                  </div>
-                </button>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
     }
 
     function openCategoryDrilldown(catId) {
@@ -1370,9 +1281,166 @@
       render();
     }
 
-    // -------------------------------------------------------------------------
-    // 5C. DRILL-DOWN DETAIL KATEGORI (PERSIS REFERENSI GAMBAR 2)
-    // -------------------------------------------------------------------------
+    function renderBudgetEvaluationSection() {
+      const expenseCats = db.categories.filter(c => c.type === 'expense');
+      const periodTxs = filterTransactionsByPeriod(db.transactions, ui.statPeriodMode, ui.statYear, ui.statMonth)
+        .filter(t => t.type === 'expense');
+      const multiplier = ui.statPeriodMode === 'yearly' ? 12 : 1;
+
+      const totalBudget = expenseCats.reduce((s, c) => s + getCategoryLimit(c) * multiplier, 0);
+      const totalSpent = periodTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+      const overallPct = totalBudget > 0 ? Math.round((totalSpent / totalBudget) * 100) : 0;
+
+      return `
+        <div class="space-y-3.5">
+          <!-- Ringkasan Evaluasi Anggaran -->
+          <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <div>
+                <span class="text-[11px] font-bold text-slate-400 uppercase">Total Anggaran ${ui.statPeriodMode === 'yearly' ? 'Tahunan' : 'Bulanan'}</span>
+                <div class="text-xl font-extrabold text-ink mt-0.5">${formatCurrency(totalSpent)} <span class="text-xs font-semibold text-slate-400">/ ${formatCurrency(totalBudget)}</span></div>
+              </div>
+              <button onclick="openBulkBudgetModal()" class="px-3 py-1.5 rounded-xl bg-creamCard hover:bg-stone-200/70 border border-stone-200 text-xs font-bold text-ink">
+                Atur Semua
+              </button>
+            </div>
+            <div class="w-full h-2.5 bg-stone-100 rounded-full overflow-hidden">
+              <div class="h-full rounded-full transition-all duration-300 ${overallPct > 100 ? 'bg-coral' : overallPct >= 80 ? 'bg-amber-500' : 'bg-sage'}"
+                style="width: ${Math.min(100, overallPct)}%"></div>
+            </div>
+            <div class="flex justify-between text-[11px] font-semibold text-slate-500">
+              <span>Terpakai ${overallPct}%</span>
+              <span>${totalBudget - totalSpent >= 0 ? `Sisa ${formatCurrency(totalBudget - totalSpent)}` : `Melebihi ${formatCurrency(totalSpent - totalBudget)}`}</span>
+            </div>
+          </div>
+
+          <!-- Kartu Evaluasi Per Kategori -->
+          ${expenseCats.map(cat => {
+            const limit = getCategoryLimit(cat) * multiplier;
+            const catTxs = periodTxs.filter(t => t.categoryId === cat.id);
+            const spent = catTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+            const pct = limit > 0 ? Math.round((spent / limit) * 100) : (spent > 0 ? 100 : 0);
+            const hasSubs = cat.subcategories && cat.subcategories.length > 0;
+            const isExpanded = Boolean(ui.expandedBudgetCats[cat.id]);
+
+            let badgeClass = 'bg-sageLight text-sage';
+            let badgeText = 'Aman';
+            let barColor = 'bg-sage';
+            if (limit > 0 && pct > 100) {
+              badgeClass = 'bg-coralLight text-coral';
+              badgeText = 'Melebihi';
+              barColor = 'bg-coral';
+            } else if (limit > 0 && pct >= 80) {
+              badgeClass = 'bg-amber-50 text-amber-700';
+              badgeText = 'Waspada';
+              barColor = 'bg-amber-500';
+            } else if (limit === 0) {
+              badgeClass = 'bg-stone-100 text-slate-500';
+              badgeText = 'Tanpa Limit';
+            }
+
+            return `
+              <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70 space-y-2.5">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="flex items-center gap-2 min-w-0">
+                    ${hasSubs ? `
+                      <button onclick="toggleBudgetCatExpand('${cat.id}')" class="p-1 rounded-lg bg-creamCard text-slate-600 hover:bg-stone-200">
+                        <svg class="w-4 h-4 transition-transform ${isExpanded ? 'rotate-90' : ''}" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                      </button>
+                    ` : ''}
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2">
+                        <button onclick="openCategoryDrilldown('${cat.id}')" class="text-sm font-extrabold text-ink hover:underline truncate text-left">${cat.name}</button>
+                        <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold ${badgeClass} shrink-0">${badgeText}</span>
+                      </div>
+                      <div class="text-xs text-slate-500 mt-0.5">
+                        <strong class="text-ink">${formatCurrency(spent)}</strong> dari ${formatCurrency(limit)} (${pct}%)
+                      </div>
+                    </div>
+                  </div>
+                  <button onclick="openEditCategoryLimitModal('${cat.id}')" class="px-2.5 py-1 rounded-xl bg-creamCard hover:bg-stone-200 text-[11px] font-bold text-ink shrink-0">
+                    Edit Limit
+                  </button>
+                </div>
+
+                <div class="w-full h-2 bg-stone-100 rounded-full overflow-hidden">
+                  <div class="h-full ${barColor} rounded-full transition-all duration-300" style="width: ${Math.min(100, pct)}%"></div>
+                </div>
+
+                ${hasSubs && isExpanded ? `
+                  <div class="pt-2 pl-3 border-l-2 border-stone-200 space-y-2">
+                    ${cat.subcategories.map(sub => {
+                      const subLimit = (Number(sub.limit) || 0) * multiplier;
+                      const subSpent = catTxs.filter(t => t.subcategoryId === sub.id).reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+                      const subPct = subLimit > 0 ? Math.round((subSpent / subLimit) * 100) : 0;
+                      return `
+                        <div class="bg-creamCard rounded-2xl p-2.5 space-y-1.5">
+                          <div class="flex items-center justify-between text-xs">
+                            <span class="font-bold text-ink">${sub.name}</span>
+                            <div class="flex items-center gap-2">
+                              <span class="text-slate-600 font-semibold">${formatCurrency(subSpent)} / ${formatCurrency(subLimit)}</span>
+                              <button onclick="openEditSubLimitModal('${cat.id}', '${sub.id}')" class="text-blue-600 font-bold hover:underline">Atur</button>
+                            </div>
+                          </div>
+                          <div class="w-full h-1.5 bg-stone-200/80 rounded-full overflow-hidden">
+                            <div class="h-full ${subPct > 100 ? 'bg-coral' : 'bg-sage'} rounded-full" style="width: ${Math.min(100, subPct)}%"></div>
+                          </div>
+                        </div>
+                      `;
+                    }).join('')}
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function renderCategoryBreakdownSection() {
+      const expenseCats = db.categories.filter(c => c.type === 'expense');
+      const periodTxs = filterTransactionsByPeriod(db.transactions, ui.statPeriodMode, ui.statYear, ui.statMonth)
+        .filter(t => t.type === 'expense');
+      const totalExpense = periodTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+
+      const rows = expenseCats.map((cat, idx) => {
+        const spent = periodTxs.filter(t => t.categoryId === cat.id).reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+        const pct = totalExpense > 0 ? Math.round((spent / totalExpense) * 100) : 0;
+        const color = ACCOUNT_COLORS[idx % ACCOUNT_COLORS.length];
+        return { cat, spent, pct, color };
+      }).sort((a, b) => b.spent - a.spent);
+
+      return `
+        <div class="space-y-3.5">
+          <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70">
+            <span class="text-xs font-bold text-slate-400">Total Pengeluaran ${ui.statPeriodMode === 'yearly' ? `Tahun ${ui.statYear}` : `${MONTH_NAMES_ID[ui.statMonth]} ${ui.statYear}`}</span>
+            <div class="text-2xl font-extrabold text-ink mt-1">${formatCurrency(totalExpense)}</div>
+            <p class="text-[11px] text-slate-500 mt-1">Ketuk kategori di bawah untuk melihat rincian subkategori & grafik tren</p>
+          </div>
+
+          <div class="bg-white rounded-3xl divide-y divide-stone-100 shadow-sm border border-stone-200/70 overflow-hidden">
+            ${rows.map(({ cat, spent, pct, color }) => `
+              <button onclick="openCategoryDrilldown('${cat.id}')" class="w-full p-4 flex items-center justify-between gap-3 hover:bg-creamCard transition-colors text-left">
+                <div class="flex items-center gap-3 min-w-0">
+                  <span class="px-2.5 py-1 rounded-xl text-xs font-extrabold shrink-0" style="background-color: ${color.bg}; color: ${color.text};">
+                    ${pct}%
+                  </span>
+                  <div class="min-w-0">
+                    <div class="text-sm font-extrabold text-ink truncate">${cat.name}</div>
+                    <div class="text-[11px] text-slate-400">${cat.subcategories?.length || 0} subkategori</div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <span class="text-sm font-extrabold text-ink">${formatCurrency(spent)}</span>
+                  <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                </div>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
     function renderCategoryDrilldown() {
       const cat = db.categories.find(c => c.id === ui.drilldownCategoryId);
       if (!cat) {
@@ -1384,460 +1452,289 @@
         ? `${ui.statYear}`
         : `${MONTH_NAMES_ID[ui.statMonth]} ${ui.statYear}`;
 
-      const periodTxs = filterTransactionsByPeriod(db.transactions, ui.statPeriodMode, ui.statYear, ui.statMonth)
+      const catPeriodTxs = filterTransactionsByPeriod(db.transactions, ui.statPeriodMode, ui.statYear, ui.statMonth)
         .filter(t => t.type === 'expense' && t.categoryId === cat.id);
 
-      const totalCatAmount = periodTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+      const totalCatSpent = catPeriodTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+      const selectedSubId = ui.drilldownSubcategoryId || 'ALL';
 
-      // Rincian Subkategori
-      const subBreakdown = (cat.subcategories || []).map(sub => {
-        const subTxs = periodTxs.filter(t => t.subcategoryId === sub.id);
-        const amount = subTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-        const pct = totalCatAmount > 0 ? Math.round((amount / totalCatAmount) * 100) : 0;
-        return { id: sub.id, name: sub.name, amount, pct };
-      }).sort((a, b) => b.amount - a.amount);
-
-      // Transaksi tanpa subkategori (jika ada)
-      const uncategorizedSubTxs = periodTxs.filter(t => !t.subcategoryId);
-      if (uncategorizedSubTxs.length > 0 && subBreakdown.length > 0) {
-        const uncAmt = uncategorizedSubTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-        const uncPct = totalCatAmount > 0 ? Math.round((uncAmt / totalCatAmount) * 100) : 0;
-        subBreakdown.push({ id: 'NONE', name: 'Umum / Tanpa Subkategori', amount: uncAmt, pct: uncPct });
-      }
-
-      // Filter transaksi & tren sesuai subkategori terpilih
-      const filteredTxs = periodTxs.filter(t => {
-        if (ui.drilldownSubcategoryId === 'ALL') return true;
-        if (ui.drilldownSubcategoryId === 'NONE') return !t.subcategoryId;
-        return t.subcategoryId === ui.drilldownSubcategoryId;
+      const subRows = (cat.subcategories || []).map(sub => {
+        const subSpent = catPeriodTxs.filter(t => t.subcategoryId === sub.id).reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+        const pct = totalCatSpent > 0 ? Math.round((subSpent / totalCatSpent) * 100) : 0;
+        return { id: sub.id, name: sub.name, spent: subSpent, pct };
       });
 
-      const displayedTotal = filteredTxs.reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+      const visibleTxs = catPeriodTxs
+        .filter(t => selectedSubId === 'ALL' || t.subcategoryId === selectedSubId)
+        .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
-      // Data Grafik Tren (8 bulan terakhir hingga bulan aktif, atau 5 tahun terakhir jika mode tahunan)
-      const trendPoints = buildCategoryTrendPoints(cat.id, ui.drilldownSubcategoryId);
+      // Data Grafik Tren (8 bulan terakhir hingga bulan aktif, atau 12 bulan jika mode tahunan)
+      const chartPoints = [];
+      if (ui.statPeriodMode === 'yearly') {
+        for (let m = 0; m < 12; m++) {
+          const mTotal = db.transactions
+            .filter(t => {
+              if (t.type !== 'expense' || t.categoryId !== cat.id || !t.date) return false;
+              if (selectedSubId !== 'ALL' && t.subcategoryId !== selectedSubId) return false;
+              const [y, mo] = t.date.split('-').map(Number);
+              return y === ui.statYear && (mo - 1) === m;
+            })
+            .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+          chartPoints.push({ label: MONTH_NAMES_ID[m], val: mTotal });
+        }
+      } else {
+        for (let i = 7; i >= 0; i--) {
+          let m = ui.statMonth - i;
+          let y = ui.statYear;
+          while (m < 0) { m += 12; y--; }
+          const mTotal = db.transactions
+            .filter(t => {
+              if (t.type !== 'expense' || t.categoryId !== cat.id || !t.date) return false;
+              if (selectedSubId !== 'ALL' && t.subcategoryId !== selectedSubId) return false;
+              const [ty, tm] = t.date.split('-').map(Number);
+              return ty === y && (tm - 1) === m;
+            })
+            .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+          chartPoints.push({ label: MONTH_NAMES_ID[m], val: mTotal });
+        }
+      }
 
-      // Kelompokkan transaksi berdasarkan tanggal
-      const groupedByDate = groupTransactionsByDate(filteredTxs);
+      const maxVal = Math.max(100000, ...chartPoints.map(p => p.val));
+      const svgW = 320;
+      const svgH = 120;
+      const padX = 18;
+      const padY = 16;
+      const coords = chartPoints.map((pt, idx) => {
+        const x = padX + (idx / Math.max(1, chartPoints.length - 1)) * (svgW - padX * 2);
+        const y = svgH - padY - (pt.val / maxVal) * (svgH - padY * 2);
+        return { ...pt, x, y };
+      });
+      const polyPoints = coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
 
       return `
-        <div class="bg-white min-h-screen pb-8 animate-fade-in">
-          <!-- Sticky Header (<- Nama Kategori   < Nov 2026 >) -->
-          <div class="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-stone-200/80 px-4 py-3 flex items-center justify-between">
-            <div class="flex items-center gap-2.5 min-w-0">
+        <div class="bg-cream min-h-screen pb-8 animate-fade-in">
+          <!-- Header Navigasi Detail Kategori -->
+          <div class="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-stone-200 px-4 py-3 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0">
               <button onclick="closeCategoryDrilldown()" class="p-1.5 -ml-1.5 rounded-xl hover:bg-stone-100 text-ink">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
               </button>
               <h1 class="text-base font-extrabold text-ink truncate">${cat.name}</h1>
             </div>
-
-            <div class="flex items-center gap-1 shrink-0">
-              <button onclick="shiftPeriod('stat', -1)" class="p-1.5 rounded-lg hover:bg-stone-100 text-slate-600">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
-              </button>
+            <div class="flex items-center gap-1 bg-creamCard px-2 py-1 rounded-xl border border-stone-200 shrink-0">
+              <button onclick="shiftPeriod('stat', -1)" class="p-1 text-slate-600">‹</button>
               <span class="text-xs font-bold text-ink min-w-[68px] text-center">${periodLabel}</span>
-              <button onclick="shiftPeriod('stat', 1)" class="p-1.5 rounded-lg hover:bg-stone-100 text-slate-600">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+              <button onclick="shiftPeriod('stat', 1)" class="p-1 text-slate-600">›</button>
+            </div>
+          </div>
+
+          <div class="p-4 space-y-4">
+            <!-- Ringkasan Total Periode -->
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70">
+              <span class="text-xs font-semibold text-slate-400">Total ${ui.statPeriodMode === 'yearly' ? 'tahunan' : 'bulanan'}</span>
+              <div class="text-2xl font-extrabold text-ink mt-0.5">${formatCurrency(totalCatSpent)}</div>
+            </div>
+
+            <!-- Tabel Subkategori ("Semua" + Daftar Subkategori) -->
+            <div class="bg-white rounded-3xl overflow-hidden shadow-sm border border-stone-200/70 divide-y divide-stone-100">
+              <button onclick="selectDrilldownSubcategory('ALL')"
+                class="w-full px-4 py-3 flex items-center justify-between text-xs transition-colors ${selectedSubId === 'ALL' ? 'bg-coralLight/80 font-extrabold text-ink' : 'text-slate-600 hover:bg-creamCard'}">
+                <span class="w-1/2 text-left">Semua</span>
+                <span class="w-1/6 text-center text-slate-500">100%</span>
+                <span class="w-1/3 text-right">${formatCurrency(totalCatSpent)}</span>
               </button>
-            </div>
-          </div>
-
-          <!-- Total Bulanan / Tahunan -->
-          <div class="px-4 pt-4 pb-3">
-            <div class="text-xs font-medium text-slate-400">
-              Total ${ui.statPeriodMode === 'yearly' ? 'tahunan' : 'bulanan'}
-            </div>
-            <div class="text-3xl font-extrabold text-ink tracking-tight mt-0.5">
-              ${formatCurrency(displayedTotal)}
-            </div>
-          </div>
-
-          <!-- Tabel Rincian Subkategori (Semua + List Subkategori) -->
-          <div class="border-t border-b border-stone-200/80 divide-y divide-stone-100">
-            <!-- Baris Semua -->
-            <button onclick="selectDrilldownSubcategory('ALL')"
-              class="w-full px-4 py-3 grid grid-cols-12 items-center text-left transition-colors ${ui.drilldownSubcategoryId === 'ALL' ? 'bg-coralLight/80' : 'hover:bg-stone-50'}">
-              <span class="col-span-5 text-sm font-bold text-ink">Semua</span>
-              <span class="col-span-3 text-center text-xs font-semibold text-slate-500">100%</span>
-              <span class="col-span-4 text-right text-sm font-bold text-ink">${formatCurrency(totalCatAmount)}</span>
-            </button>
-
-            ${subBreakdown.map(sub => {
-              const isSelected = ui.drilldownSubcategoryId === sub.id;
-              return `
-                <button onclick="selectDrilldownSubcategory('${sub.id}')"
-                  class="w-full px-4 py-3 grid grid-cols-12 items-center text-left transition-colors ${isSelected ? 'bg-coralLight/80' : 'hover:bg-stone-50'}">
-                  <span class="col-span-5 text-sm font-medium text-ink truncate pr-2">${sub.name}</span>
-                  <span class="col-span-3 text-center text-xs font-medium text-slate-500">${sub.pct}%</span>
-                  <span class="col-span-4 text-right text-sm font-semibold text-ink">${formatCurrency(sub.amount)}</span>
+              ${subRows.map(sr => `
+                <button onclick="selectDrilldownSubcategory('${sr.id}')"
+                  class="w-full px-4 py-3 flex items-center justify-between text-xs transition-colors ${selectedSubId === sr.id ? 'bg-coralLight/80 font-extrabold text-ink' : 'text-slate-700 hover:bg-creamCard'}">
+                  <span class="w-1/2 text-left truncate">${sr.name}</span>
+                  <span class="w-1/6 text-center text-slate-400">${sr.pct}%</span>
+                  <span class="w-1/3 text-right font-bold">${formatCurrency(sr.spent)}</span>
                 </button>
-              `;
-            }).join('')}
-          </div>
+              `).join('')}
+            </div>
 
-          <!-- Grafik Tren Line Chart SVG Responsif -->
-          <div class="px-4 py-4 bg-stone-50/70 border-b border-stone-200/80">
-            ${renderTrendLineChartSVG(trendPoints)}
-          </div>
-
-          <!-- Daftar Transaksi Dikelompokkan Per Tanggal -->
-          <div class="divide-y divide-stone-200/80">
-            ${groupedByDate.length === 0 ? `
-              <div class="py-10 text-center text-xs text-slate-400">
-                Belum ada transaksi pada periode & filter ini.
+            <!-- Grafik Tren Pengeluaran (Line Chart) -->
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-xs font-extrabold text-ink">Grafik Tren Pengeluaran</span>
+                <span class="text-[10px] font-semibold text-slate-400">Maks: ${formatShortRupiah(maxVal)}</span>
               </div>
-            ` : groupedByDate.map(group => `
-              <div>
-                <!-- Header Tanggal (17 Sel 11.2026) -->
-                <div class="px-4 py-2 bg-stone-50/90 flex items-center justify-between border-b border-stone-100">
-                  <div class="flex items-center gap-2">
-                    <span class="text-base font-extrabold text-ink">${group.dayNum}</span>
-                    <span class="px-1.5 py-0.5 rounded bg-stone-200/80 text-[10px] font-bold text-slate-600">${group.dayName}</span>
-                    <span class="text-xs text-slate-400 font-medium">${group.monthYear}</span>
-                  </div>
-                  <div class="flex items-center gap-4 text-xs font-bold">
-                    <span class="text-blue-500">Rp 0</span>
-                    <span class="text-coral">${formatCurrency(group.dayTotal)}</span>
-                  </div>
-                </div>
+              <svg viewBox="0 0 ${svgW} ${svgH + 18}" class="w-full h-36 overflow-visible">
+                <line x1="${padX}" y1="${padY}" x2="${svgW - padX}" y2="${padY}" stroke="#E5E7EB" stroke-dasharray="3 3" />
+                <line x1="${padX}" y1="${svgH / 2}" x2="${svgW - padX}" y2="${svgH / 2}" stroke="#E5E7EB" stroke-dasharray="3 3" />
+                <line x1="${padX}" y1="${svgH - padY}" x2="${svgW - padX}" y2="${svgH - padY}" stroke="#CBD5E1" />
+                <polyline fill="none" stroke="#E05A47" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points="${polyPoints}" />
+                ${coords.map(c => `
+                  <circle cx="${c.x}" cy="${c.y}" r="3.5" fill="#E05A47" stroke="#FFFFFF" stroke-width="1.5" />
+                  <text x="${c.x}" y="${svgH + 12}" text-anchor="middle" font-size="9" fill="#64748B" font-weight="600">${c.label}</text>
+                `).join('')}
+              </svg>
+            </div>
 
-                <!-- Item Transaksi pada Tanggal Tersebut -->
+            <!-- Daftar Transaksi Terkait -->
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70">
+              <h3 class="text-xs font-extrabold text-ink mb-2">Transaksi Terkait (${visibleTxs.length})</h3>
+              ${visibleTxs.length === 0 ? `
+                <div class="py-6 text-center text-xs text-slate-400">Belum ada transaksi pada periode ini.</div>
+              ` : `
                 <div class="divide-y divide-stone-100">
-                  ${group.items.map(tx => {
-                    const subObj = (cat.subcategories || []).find(s => s.id === tx.subcategoryId);
-                    const accObj = db.accounts.find(a => a.id === tx.accountId);
-                    const pktObj = accObj?.pockets?.find(p => p.id === tx.pocketId);
-                    const sourceLabel = pktObj ? pktObj.name : (accObj ? accObj.name : 'Akun');
-                    return `
-                      <div class="px-4 py-3 grid grid-cols-12 items-center gap-2 hover:bg-creamCard/60">
-                        <div class="col-span-4 min-w-0">
-                          <div class="text-xs font-semibold text-slate-500 truncate">${cat.name}</div>
-                          <div class="text-[11px] text-slate-400 truncate">${subObj ? subObj.name : '-'}</div>
-                        </div>
-                        <div class="col-span-5 min-w-0">
-                          <div class="text-sm font-bold text-ink truncate">${tx.title || cat.name}</div>
-                          <div class="text-[11px] text-slate-400 truncate">${sourceLabel}</div>
-                        </div>
-                        <div class="col-span-3 text-right">
-                          <span class="text-sm font-bold text-coral">${formatCurrency(toIDR(tx.amount, getTxCurrency(tx)))}</span>
-                        </div>
-                      </div>
-                    `;
-                  }).join('')}
+                  ${visibleTxs.map(tx => renderTransactionRow(tx)).join('')}
                 </div>
-              </div>
-            `).join('')}
+              `}
+            </div>
           </div>
         </div>
       `;
     }
 
-    function buildCategoryTrendPoints(catId, subFilterId) {
-      const points = [];
-      if (ui.statPeriodMode === 'yearly') {
-        for (let offset = 4; offset >= 0; offset--) {
-          const y = ui.statYear - offset;
-          const total = db.transactions
-            .filter(t => t.type === 'expense' && t.categoryId === catId)
-            .filter(t => {
-              if (subFilterId === 'ALL') return true;
-              if (subFilterId === 'NONE') return !t.subcategoryId;
-              return t.subcategoryId === subFilterId;
-            })
-            .filter(t => Number(t.date.split('-')[0]) === y)
-            .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-          points.push({ label: String(y), value: total });
-        }
-      } else {
-        // 8 bulan terakhir sampai ui.statMonth / ui.statYear (misal Apr - Nov)
-        for (let offset = 7; offset >= 0; offset--) {
-          let m = ui.statMonth - offset;
-          let y = ui.statYear;
-          while (m < 0) { m += 12; y--; }
-          const total = db.transactions
-            .filter(t => t.type === 'expense' && t.categoryId === catId)
-            .filter(t => {
-              if (subFilterId === 'ALL') return true;
-              if (subFilterId === 'NONE') return !t.subcategoryId;
-              return t.subcategoryId === subFilterId;
-            })
-            .filter(t => {
-              const [ty, tm] = t.date.split('-').map(Number);
-              return ty === y && (tm - 1) === m;
-            })
-            .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-          points.push({ label: MONTH_NAMES_ID[m], value: total });
-        }
-      }
-      return points;
-    }
-
-    function renderTrendLineChartSVG(points) {
-      const width = 360;
-      const height = 165;
-      const padLeft = 44;
-      const padRight = 14;
-      const padTop = 16;
-      const padBottom = 26;
-      const chartW = width - padLeft - padRight;
-      const chartH = height - padTop - padBottom;
-
-      const rawMax = Math.max(...points.map(p => p.value), 100000);
-      // Bulatkan skala atas agar bersih (kelipatan 500k atau 100k)
-      const stepUnit = rawMax > 1000000 ? 500000 : rawMax > 200000 ? 100000 : 50000;
-      const maxVal = Math.ceil(rawMax / stepUnit) * stepUnit;
-      const midVal = maxVal / 2;
-
-      const coords = points.map((p, i) => {
-        const x = padLeft + (points.length > 1 ? (i / (points.length - 1)) * chartW : chartW / 2);
-        const y = padTop + chartH - (p.value / maxVal) * chartH;
-        return { x, y, label: p.label, value: p.value };
-      });
-
-      const polyPoints = coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
-
-      return `
-        <svg viewBox="0 0 ${width} ${height}" class="w-full h-auto overflow-visible select-none">
-          <!-- Grid Horizontal -->
-          <line x1="${padLeft}" y1="${padTop}" x2="${width - padRight}" y2="${padTop}" stroke="#E5E7EB" stroke-width="1" />
-          <line x1="${padLeft}" y1="${padTop + chartH / 2}" x2="${width - padRight}" y2="${padTop + chartH / 2}" stroke="#E5E7EB" stroke-width="1" />
-          <line x1="${padLeft}" y1="${padTop + chartH}" x2="${width - padRight}" y2="${padTop + chartH}" stroke="#D1D5DB" stroke-width="1" />
-          <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + chartH}" stroke="#D1D5DB" stroke-width="1" />
-
-          <!-- Y Axis Labels -->
-          <text x="${padLeft - 6}" y="${padTop + 4}" text-anchor="end" fill="#9CA3AF" font-size="9.5" font-weight="600">${formatShortRupiah(maxVal)}</text>
-          <text x="${padLeft - 6}" y="${padTop + chartH / 2 + 3}" text-anchor="end" fill="#9CA3AF" font-size="9.5" font-weight="600">${formatShortRupiah(midVal)}</text>
-          <text x="${padLeft - 6}" y="${padTop + chartH + 3}" text-anchor="end" fill="#9CA3AF" font-size="9.5" font-weight="600">0</text>
-
-          <!-- Line Path -->
-          <polyline fill="none" stroke="#EF5350" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points="${polyPoints}" />
-
-          <!-- Data Dots & X Axis Labels -->
-          ${coords.map((c, idx) => `
-            <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="4" fill="#EF5350" stroke="#FFFFFF" stroke-width="1.5" />
-            <text x="${c.x.toFixed(1)}" y="${height - 6}" text-anchor="middle" fill="${idx === coords.length - 1 ? '#1A2433' : '#9CA3AF'}" font-size="10" font-weight="${idx === coords.length - 1 ? '700' : '500'}">
-              ${c.label}
-            </text>
-          `).join('')}
-        </svg>
-      `;
-    }
-
-    function groupTransactionsByDate(txs) {
-      const sorted = [...txs].sort((a, b) => b.date.localeCompare(a.date));
-      const map = new Map();
-
-      sorted.forEach(tx => {
-        if (!map.has(tx.date)) {
-          const [y, m, d] = tx.date.split('-').map(Number);
-          const dt = new Date(y, m - 1, d);
-          map.set(tx.date, {
-            date: tx.date,
-            dayNum: String(d).padStart(2, '0'),
-            dayName: DAY_NAMES_ID[dt.getDay()],
-            monthYear: `${String(m).padStart(2, '0')}.${y}`,
-            dayTotal: 0,
-            items: []
-          });
-        }
-        const g = map.get(tx.date);
-        g.dayTotal += toIDR(tx.amount, getTxCurrency(tx));
-        g.items.push(tx);
-      });
-
-      return Array.from(map.values());
-    }
-
     // =========================================================================
-    // 6. VIEW 2: MENU AKUN (BULANAN/TAHUNAN, VALAS, WARNA, IKON, POCKET DETAIL)
+    // 6. VIEW 2: AKUN (MULTI-POCKET, MATA UANG ASING, WARNA & IKON CELENGAN)
     // =========================================================================
     function renderAkunView() {
-      // Jika sedang membuka detail salah satu Pocket
       if (ui.selectedPocketDetail) {
         return renderPocketDetailView();
       }
 
-      const totalWealthIDR = getTotalNetWorthIDR();
+      const netWorthIDR = getTotalNetWorthIDR();
+      const periodTxs = filterTransactionsByPeriod(db.transactions, ui.akunPeriodMode, ui.akunYear, ui.akunMonth);
+      const periodIncomeIDR = periodTxs
+        .filter(t => t.type === 'income')
+        .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+      const periodExpenseIDR = periodTxs
+        .filter(t => t.type === 'expense')
+        .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
+      const periodDiffIDR = periodIncomeIDR - periodExpenseIDR;
+
       const periodLabel = ui.akunPeriodMode === 'yearly'
         ? `${ui.akunYear}`
         : `${MONTH_NAMES_ID[ui.akunMonth]} ${ui.akunYear}`;
 
-      const periodTxs = filterTransactionsByPeriod(db.transactions, ui.akunPeriodMode, ui.akunYear, ui.akunMonth);
-      const totalIncomePeriod = periodTxs
-        .filter(t => t.type === 'income')
-        .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-      const totalExpensePeriod = periodTxs
-        .filter(t => t.type === 'expense')
-        .reduce((s, t) => s + toIDR(t.amount, getTxCurrency(t)), 0);
-      const netFlowPeriod = totalIncomePeriod - totalExpensePeriod;
-
       return `
         <div class="p-4 space-y-4">
-          <!-- Header Menu Akun & Filter Bulanan / Tahunan (Soft Sky Blue Pastel) -->
-          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #EFF6FF; border-color: #BFDBFE;">
-            <div class="flex items-center justify-between">
+          <!-- Header Menu Akun (Medium-Soft Dusty Blue Pastel - Lebih Pekat & Kontras) -->
+          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #DCE7FE; border-color: #B4CAFA;">
+            <div class="flex items-center justify-between gap-2">
               <div>
                 <h1 class="text-xl font-extrabold text-ink tracking-tight">Akun</h1>
-                <p class="text-xs text-slate-600">Kelola saldo akun, valas & kantong simpanan</p>
+                <p class="text-xs text-slate-700">Kelola saldo, pocket & mata uang asing</p>
               </div>
-              <button onclick="openAccountModal()" class="px-3.5 py-2 rounded-2xl bg-ink text-white text-xs font-bold hover:bg-slate-800 active:scale-95 transition-all flex items-center gap-1.5 shadow-sm">
-                <span>+ Akun</span>
+              <button onclick="openAccountModal()" class="px-3.5 py-2 rounded-2xl bg-ink text-white text-xs font-bold shadow-sm hover:bg-slate-800">
+                + Akun
               </button>
             </div>
 
-            <!-- Filter Periode Bulanan / Tahunan -->
-            <div class="flex items-center justify-between pt-2 border-t border-[#BFDBFE]/80">
-              <div class="bg-white/90 p-1 rounded-xl flex text-xs font-semibold border border-[#BFDBFE]/70">
-                <button onclick="setAkunPeriodMode('monthly')" class="px-2.5 py-1 rounded-lg transition-all ${ui.akunPeriodMode === 'monthly' ? 'bg-ink text-white shadow-sm' : 'text-slate-600'}">Bulanan</button>
-                <button onclick="setAkunPeriodMode('yearly')" class="px-2.5 py-1 rounded-lg transition-all ${ui.akunPeriodMode === 'yearly' ? 'bg-ink text-white shadow-sm' : 'text-slate-600'}">Tahunan</button>
+            <div class="flex items-center justify-between pt-2 border-t border-[#B4CAFA]">
+              <div class="bg-white/90 p-1 rounded-xl flex text-xs font-semibold border border-[#B4CAFA]">
+                <button onclick="setAkunPeriodMode('monthly')" class="px-2.5 py-1 rounded-lg ${ui.akunPeriodMode === 'monthly' ? 'bg-ink text-white' : 'text-slate-600'}">Bulanan</button>
+                <button onclick="setAkunPeriodMode('yearly')" class="px-2.5 py-1 rounded-lg ${ui.akunPeriodMode === 'yearly' ? 'bg-ink text-white' : 'text-slate-600'}">Tahunan</button>
               </div>
 
-              <div class="flex items-center gap-1 bg-white/90 px-2 py-1 rounded-xl border border-[#BFDBFE]">
-                <button onclick="shiftPeriod('akun', -1)" class="p-1 hover:bg-[#EFF6FF] rounded-lg text-slate-600">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
-                </button>
-                <span class="text-xs font-bold text-ink min-w-[74px] text-center">${periodLabel}</span>
-                <button onclick="shiftPeriod('akun', 1)" class="p-1 hover:bg-[#EFF6FF] rounded-lg text-slate-600">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
-                </button>
+              <div class="flex items-center gap-1 bg-white/90 px-2 py-1 rounded-xl border border-[#B4CAFA]">
+                <button onclick="shiftPeriod('akun', -1)" class="p-1 text-slate-600">‹</button>
+                <span class="text-xs font-bold text-ink min-w-[70px] text-center">${periodLabel}</span>
+                <button onclick="shiftPeriod('akun', 1)" class="p-1 text-slate-600">›</button>
               </div>
             </div>
           </div>
 
-          <!-- Kartu Total Kekayaan (Soft Periwinkle / Sky Blue Pastel) -->
-          <div class="rounded-3xl p-5 shadow-sm border relative overflow-hidden" style="background: linear-gradient(135deg, #EEF4FF 0%, #DCE9FF 100%); border-color: #C7D9FC; color: #1A2433;">
-            <div class="absolute -right-8 -top-8 w-32 h-32 rounded-full bg-white/50 pointer-events-none"></div>
+          <!-- Kartu Total Kekayaan (Warm Champagne / Sand Pastel agar kontras dari header & kartu akun biru) -->
+          <div class="rounded-3xl p-5 shadow-sm border relative overflow-hidden" style="background: linear-gradient(135deg, #FAF1DF 0%, #F3E5C8 100%); border-color: #E2CCA2; color: #1A2433;">
             <div class="flex items-center justify-between gap-2">
-              <div>
-                <span class="text-xs font-bold text-slate-700">Total Kekayaan (Konversi IDR)</span>
-                <div class="flex items-center gap-1.5 mt-0.5">
-                  <span class="w-1.5 h-1.5 rounded-full ${db.exchangeRateMeta?.source === 'live' ? 'bg-emerald-600 animate-pulse' : 'bg-amber-500'}"></span>
-                  <span class="text-[10px] font-medium text-slate-600">
-                    ${db.exchangeRateMeta?.source === 'live' ? `Kurs Live Internet (${db.exchangeRateMeta.lastUpdated || 'Baru saja'})` : 'Kurs Tersimpan (Offline)'}
-                  </span>
-                </div>
-              </div>
-              <div class="flex items-center gap-1.5 shrink-0">
+              <span class="text-xs font-bold text-slate-700">Total Kekayaan (Konversi IDR)</span>
+              <div class="flex items-center gap-1.5">
                 <button onclick="fetchLiveExchangeRates(false)" ${isFetchingRates ? 'disabled' : ''}
-                  class="text-[11px] font-bold bg-white/85 hover:bg-white text-emerald-700 px-2.5 py-1 rounded-full border border-emerald-200 transition-colors">
-                  ${isFetchingRates ? 'Memuat...' : '↻ Sync Kurs'}
+                  class="px-2.5 py-1 rounded-xl bg-white/90 text-sage border border-[#E2CCA2] text-[11px] font-extrabold hover:bg-white">
+                  ${isFetchingRates ? 'Sync...' : '↻ Sync Kurs'}
                 </button>
-                <button onclick="openExchangeRateModal()" class="text-[11px] font-bold bg-white/85 hover:bg-white text-ink px-2.5 py-1 rounded-full border border-[#C7D9FC] transition-colors">
+                <button onclick="openExchangeRateModal()"
+                  class="px-2.5 py-1 rounded-xl bg-white/90 text-ink border border-[#E2CCA2] text-[11px] font-extrabold hover:bg-white">
                   Kurs ⇄
                 </button>
               </div>
             </div>
-            <div class="text-2xl sm:text-3xl font-extrabold tracking-tight mt-2 text-ink">
-              ${formatCurrency(totalWealthIDR, 'IDR')}
+            <div class="text-[11px] text-slate-600 mt-0.5 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full ${db.exchangeRateMeta?.source === 'live' ? 'bg-sage' : 'bg-amber-500'}"></span>
+              <span>${db.exchangeRateMeta?.source === 'live' ? `Kurs Live Internet (${db.exchangeRateMeta.lastUpdated || 'Aktif'})` : 'Kurs Tersimpan Lokal'}</span>
             </div>
 
-            <!-- Ringkasan Arus Kas Periode Terpilih -->
-            <div class="grid grid-cols-3 gap-2 mt-4 pt-3.5 border-t border-[#B8CEFA] text-xs">
+            <div class="text-2xl sm:text-3xl font-extrabold tracking-tight mt-2 text-ink">
+              ${formatCurrency(netWorthIDR, 'IDR')}
+            </div>
+
+            <div class="grid grid-cols-3 gap-2 mt-4 pt-3 border-t border-[#E2CCA2]/90 text-xs">
               <div>
-                <div class="text-[10px] font-semibold text-slate-600">Masuk (${periodLabel})</div>
-                <div class="font-extrabold text-emerald-700 mt-0.5 truncate">+${formatShortRupiah(totalIncomePeriod)}</div>
+                <span class="text-[11px] text-slate-600 block">Masuk (${periodLabel})</span>
+                <span class="font-extrabold text-sage">+${formatShortRupiah(periodIncomeIDR)}</span>
               </div>
               <div>
-                <div class="text-[10px] font-semibold text-slate-600">Keluar (${periodLabel})</div>
-                <div class="font-extrabold text-coral mt-0.5 truncate">-${formatShortRupiah(totalExpensePeriod)}</div>
+                <span class="text-[11px] text-slate-600 block">Keluar (${periodLabel})</span>
+                <span class="font-extrabold text-coral">-${formatShortRupiah(periodExpenseIDR)}</span>
               </div>
               <div>
-                <div class="text-[10px] font-semibold text-slate-600">Selisih</div>
-                <div class="font-extrabold ${netFlowPeriod >= 0 ? 'text-ink' : 'text-amber-700'} mt-0.5 truncate">
-                  ${netFlowPeriod >= 0 ? '+' : ''}${formatShortRupiah(netFlowPeriod)}
-                </div>
+                <span class="text-[11px] text-slate-600 block">Selisih</span>
+                <span class="font-extrabold text-ink">${periodDiffIDR >= 0 ? '+' : ''}${formatShortRupiah(periodDiffIDR)}</span>
               </div>
             </div>
           </div>
 
-          <!-- Daftar Akun Berwarna Berbeda & Pocket di Dalamnya -->
-          <div class="space-y-4">
+          <!-- Daftar Akun & Pocket -->
+          <div class="space-y-3.5">
             ${db.accounts.map(acc => {
               const color = getColorObj(acc.colorId);
-              const totalAccBal = getAccountTotalBalance(acc);
-              const isForeign = acc.currency !== 'IDR';
-              const convertedIDR = toIDR(totalAccBal, acc.currency);
               const iconSvg = ICONS[acc.icon] || ICONS.celengan;
+              const accTotal = getAccountTotalBalance(acc);
+              const isForeign = acc.currency !== 'IDR';
+              const accTotalIDR = toIDR(accTotal, acc.currency);
 
               return `
-                <div class="rounded-3xl p-4 shadow-sm border-2 transition-all" style="background-color: ${color.bg}; border-color: ${color.border};">
-                  <!-- Header Akun -->
+                <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: ${color.bg}; border-color: ${color.border};">
                   <div class="flex items-start justify-between gap-2">
                     <div class="flex items-center gap-3 min-w-0">
-                      <div class="w-11 h-11 rounded-2xl flex items-center justify-center text-white shadow-sm shrink-0" style="background-color: ${color.hex};">
+                      <div class="w-11 h-11 rounded-2xl flex items-center justify-center text-white shrink-0 shadow-xs" style="background-color: ${color.hex};">
                         ${iconSvg}
                       </div>
                       <div class="min-w-0">
                         <div class="flex items-center gap-1.5">
                           <h3 class="text-base font-extrabold text-ink truncate">${acc.name}</h3>
-                          <span class="px-1.5 py-0.5 rounded-md text-[10px] font-extrabold bg-white/80 text-ink border border-black/5">
-                            ${acc.currency}
-                          </span>
+                          <span class="px-2 py-0.5 rounded-md bg-white/80 text-[10px] font-extrabold" style="color: ${color.text};">${acc.currency}</span>
                         </div>
-                        <div class="mt-0.5">
-                          <span class="text-base font-extrabold" style="color: ${color.text};">
-                            ${formatCurrency(totalAccBal, acc.currency)}
-                          </span>
-                          ${isForeign ? `
-                            <span class="block text-xs font-semibold text-slate-600">
-                              (${formatCurrency(convertedIDR, 'IDR')})
-                            </span>
-                            <span class="inline-block text-[10px] font-medium text-slate-500 bg-white/70 px-1.5 py-0.5 rounded mt-0.5">
-                              1 ${acc.currency} = ${formatCurrency(db.exchangeRates[acc.currency] || 0, 'IDR')}
-                            </span>
-                          ` : ''}
+                        <div class="text-lg font-extrabold mt-0.5" style="color: ${color.text};">
+                          ${formatCurrency(accTotal, acc.currency)}
+                          ${isForeign ? `<span class="text-xs font-bold text-slate-600 block sm:inline">(${formatCurrency(accTotalIDR, 'IDR')})</span>` : ''}
                         </div>
+                        ${isForeign ? `<div class="text-[10px] text-slate-500">1 ${acc.currency} = ${formatCurrency(db.exchangeRates[acc.currency], 'IDR')}</div>` : ''}
                       </div>
                     </div>
 
-                    <!-- Tombol Edit Akun & Tambah Pocket -->
                     <div class="flex items-center gap-1 shrink-0">
-                      <button onclick="openPocketModal('${acc.id}')" title="Tambah Pocket"
-                        class="px-2.5 py-1.5 rounded-xl bg-white/90 hover:bg-white text-xs font-bold text-ink shadow-xs border border-black/5">
+                      <button onclick="openPocketModal('${acc.id}')" class="px-2.5 py-1.5 rounded-xl bg-white/90 hover:bg-white text-[11px] font-extrabold text-ink shadow-2xs">
                         + Pocket
                       </button>
-                      <button onclick="openAccountModal('${acc.id}')" title="Edit Akun"
-                        class="p-2 rounded-xl bg-white/90 hover:bg-white text-slate-600 shadow-xs border border-black/5">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
+                      <button onclick="openAccountModal('${acc.id}')" title="Edit Akun" class="p-2 rounded-xl bg-white/90 hover:bg-white text-slate-600">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
                       </button>
                     </div>
                   </div>
 
-                  <!-- Daftar Pocket di Dalam Akun -->
-                  <div class="mt-3.5 space-y-2">
+                  <!-- Daftar Pocket dalam Akun -->
+                  <div class="space-y-2">
                     ${(acc.pockets || []).map(pkt => {
                       const pktIDR = toIDR(pkt.balance, acc.currency);
-                      // Hitung arus kas pocket pada periode terpilih
-                      const pktTxs = periodTxs.filter(t =>
-                        (t.accountId === acc.id && t.pocketId === pkt.id) ||
-                        (t.type === 'transfer' && t.toAccountId === acc.id && t.toPocketId === pkt.id)
-                      );
                       return `
-                        <div class="bg-white/95 hover:bg-white rounded-2xl p-3 border border-black/5 flex items-center justify-between gap-2 shadow-2xs transition-all">
-                          <!-- Klik Pocket untuk Detail Bulanan, Transaksi & Transfer -->
+                        <div class="bg-white/95 rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2 border border-white">
                           <button onclick="openPocketDetail('${acc.id}', '${pkt.id}')" class="flex-1 text-left min-w-0 group">
-                            <div class="flex items-center gap-1.5">
-                              <span class="w-2 h-2 rounded-full shrink-0" style="background-color: ${color.hex};"></span>
-                              <span class="text-sm font-bold text-ink group-hover:underline truncate">${pkt.name}</span>
-                              <span class="text-[10px] text-slate-400">(${pktTxs.length} tx)</span>
-                            </div>
-                            <div class="mt-0.5 pl-3.5">
-                              <span class="text-sm font-extrabold text-ink">${formatCurrency(pkt.balance, acc.currency)}</span>
-                              ${isForeign ? `
-                                <span class="text-[11px] font-medium text-slate-500 ml-1">(${formatCurrency(pktIDR, 'IDR')})</span>
-                              ` : ''}
+                            <div class="text-xs font-extrabold text-ink group-hover:underline truncate">${pkt.name}</div>
+                            <div class="text-sm font-extrabold mt-0.5" style="color: ${color.text};">
+                              ${formatCurrency(pkt.balance, acc.currency)}
+                              ${isForeign ? `<span class="text-[11px] font-semibold text-slate-400">(${formatCurrency(pktIDR, 'IDR')})</span>` : ''}
                             </div>
                           </button>
-
-                          <!-- Tombol Edit Saldo Pocket Langsung -->
                           <div class="flex items-center gap-1 shrink-0">
-                            <button onclick="openPocketModal('${acc.id}', '${pkt.id}')" title="Edit Pocket"
-                              class="px-2.5 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-[11px] font-bold text-slate-700">
+                            <button onclick="openPocketModal('${acc.id}', '${pkt.id}')" class="px-2.5 py-1 rounded-xl bg-creamCard hover:bg-stone-200 text-[11px] font-bold text-slate-600">
                               Edit
                             </button>
-                            <button onclick="openPocketDetail('${acc.id}', '${pkt.id}')" title="Detail Pocket"
-                              class="p-1.5 rounded-xl hover:bg-stone-100 text-slate-400">
-                              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                            <button onclick="openPocketDetail('${acc.id}', '${pkt.id}')" class="p-1.5 rounded-xl text-slate-400 hover:text-ink">
+                              ›
                             </button>
                           </div>
                         </div>
@@ -1868,14 +1765,15 @@
       render();
     }
 
-    // -------------------------------------------------------------------------
-    // 6B. DETAIL POCKET (RINCIAN NOMINAL PER BULAN, TRANSAKSI, TRANSFER & TAMBAH)
-    // -------------------------------------------------------------------------
-    function renderPocketDetailView() {
-      const { accountId, pocketId } = ui.selectedPocketDetail;
-      const acc = db.accounts.find(a => a.id === accountId);
-      const pkt = acc?.pockets?.find(p => p.id === pocketId);
+    function selectPocketDetailMonth(monthIdx) {
+      ui.akunMonth = monthIdx;
+      render();
+    }
 
+    function renderPocketDetailView() {
+      const sel = ui.selectedPocketDetail;
+      const acc = db.accounts.find(a => a.id === sel?.accountId);
+      const pkt = acc?.pockets?.find(p => p.id === sel?.pocketId);
       if (!acc || !pkt) {
         ui.selectedPocketDetail = null;
         return renderAkunView();
@@ -1883,155 +1781,128 @@
 
       const color = getColorObj(acc.colorId);
       const isForeign = acc.currency !== 'IDR';
+      const activeYear = ui.akunYear;
+      const activeMonth = ui.akunMonth;
 
-      // Semua transaksi yang melibatkan pocket ini
-      const relatedTxs = db.transactions.filter(t =>
-        (t.accountId === accountId && t.pocketId === pocketId) ||
-        (t.type === 'transfer' && t.toAccountId === accountId && t.toPocketId === pocketId)
-      ).sort((a, b) => b.date.localeCompare(a.date));
+      // Rincian 12 Bulan (Januari - Desember) pada tahun aktif
+      const monthlyRows = MONTH_NAMES_ID.map((mName, mIdx) => {
+        let income = 0;
+        let expense = 0;
+        db.transactions.forEach(tx => {
+          if (!tx.date) return;
+          const [y, m] = tx.date.split('-').map(Number);
+          if (y !== activeYear || (m - 1) !== mIdx) return;
 
-      // Filter riwayat transaksi & transfer sesuai bulan & tahun yang aktif di menu Akun
-      const activeMonthLabel = `${MONTH_NAMES_ID[ui.akunMonth]} ${ui.akunYear}`;
-      const monthlyFilteredTxs = relatedTxs.filter(t => {
-        if (!t.date) return false;
-        const [ty, tm] = t.date.split('-').map(Number);
-        return ty === ui.akunYear && (tm - 1) === ui.akunMonth;
-      });
-
-      // Rincian Nominal Per Bulan dari Januari sampai Desember (tahun aktif ui.akunYear)
-      const monthlySummaries = [];
-      for (let m = 0; m < 12; m++) {
-        let masuk = 0;
-        let keluar = 0;
-
-        relatedTxs.forEach(t => {
-          const [ty, tm] = t.date.split('-').map(Number);
-          if (ty === ui.akunYear && (tm - 1) === m) {
-            if (t.type === 'income') {
-              masuk += Number(t.amount) || 0;
-            } else if (t.type === 'expense') {
-              keluar += Number(t.amount) || 0;
-            } else if (t.type === 'transfer') {
-              if (t.accountId === accountId && t.pocketId === pocketId) {
-                keluar += Number(t.amount) || 0;
-              }
-              if (t.toAccountId === accountId && t.toPocketId === pocketId) {
-                masuk += Number(t.amount) || 0;
-              }
+          if (tx.type === 'income' && tx.accountId === acc.id && tx.pocketId === pkt.id) {
+            income += Number(tx.amount) || 0;
+          } else if (tx.type === 'expense' && tx.accountId === acc.id && tx.pocketId === pkt.id) {
+            expense += Number(tx.amount) || 0;
+          } else if (tx.type === 'transfer') {
+            if (tx.accountId === acc.id && tx.pocketId === pkt.id) {
+              expense += Number(tx.amount) || 0;
+            }
+            if (tx.toAccountId === acc.id && tx.toPocketId === pkt.id) {
+              const srcAcc = db.accounts.find(a => a.id === tx.accountId);
+              const inIDR = toIDR(tx.amount, srcAcc ? srcAcc.currency : acc.currency);
+              const rate = db.exchangeRates[acc.currency] || 1;
+              const val = (srcAcc && srcAcc.currency === acc.currency) ? Number(tx.amount) : (inIDR / rate);
+              income += Number(val) || 0;
             }
           }
         });
+        return { mIdx, mName, income, expense, diff: income - expense };
+      });
 
-        monthlySummaries.push({
-          monthIdx: m,
-          label: `${MONTH_NAMES_ID[m]} ${ui.akunYear}`,
-          masuk,
-          keluar,
-          net: masuk - keluar
-        });
-      }
+      // Riwayat transaksi & transfer pada bulan & tahun aktif
+      const monthTxs = db.transactions
+        .filter(tx => {
+          if (!tx.date) return false;
+          const [y, m] = tx.date.split('-').map(Number);
+          if (y !== activeYear || (m - 1) !== activeMonth) return false;
+          const isSrc = tx.accountId === acc.id && tx.pocketId === pkt.id;
+          const isDst = tx.type === 'transfer' && tx.toAccountId === acc.id && tx.toPocketId === pkt.id;
+          return isSrc || isDst;
+        })
+        .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
       return `
         <div class="bg-cream min-h-screen pb-8 animate-fade-in">
-          <!-- Header -->
-          <div class="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-stone-200 px-4 py-3 flex items-center justify-between">
-            <div class="flex items-center gap-2.5 min-w-0">
+          <!-- Header Pocket Detail -->
+          <div class="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-stone-200 px-4 py-3 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0">
               <button onclick="closePocketDetail()" class="p-1.5 -ml-1.5 rounded-xl hover:bg-stone-100 text-ink">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
               </button>
               <div class="truncate">
-                <div class="text-[11px] font-bold uppercase tracking-wider" style="color: ${color.hex};">${acc.name}</div>
                 <h1 class="text-base font-extrabold text-ink truncate">${pkt.name}</h1>
+                <span class="text-[11px] text-slate-500 block truncate">${acc.name} (${acc.currency})</span>
               </div>
             </div>
-            <button onclick="openPocketModal('${acc.id}', '${pkt.id}')" class="px-3 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-xs font-bold text-ink">
-              Edit Pocket
+            <button onclick="openPocketModal('${acc.id}', '${pkt.id}')" class="px-3 py-1.5 rounded-xl bg-stone-100 text-xs font-bold text-ink shrink-0">
+              Edit Saldo
             </button>
           </div>
 
           <div class="p-4 space-y-4">
-            <!-- Kartu Saldo Pocket & Tombol Tambah Transaksi / Transfer -->
+            <!-- Kartu Saldo Pocket -->
             <div class="rounded-3xl p-5 text-white shadow-md" style="background-color: ${color.hex};">
-              <span class="text-xs font-semibold text-white/80">Saldo Pocket Saat Ini</span>
-              <div class="text-3xl font-extrabold mt-1">
-                ${formatCurrency(pkt.balance, acc.currency)}
-              </div>
-              ${isForeign ? `
-                <div class="text-xs font-semibold text-white/90 mt-0.5">
-                  (${formatCurrency(toIDR(pkt.balance, acc.currency), 'IDR')})
-                </div>
-              ` : ''}
+              <span class="text-xs text-white/80 font-semibold">Saldo Pocket Saat Ini</span>
+              <div class="text-3xl font-extrabold mt-1">${formatCurrency(pkt.balance, acc.currency)}</div>
+              ${isForeign ? `<div class="text-xs text-white/85 mt-0.5">(${formatCurrency(toIDR(pkt.balance, acc.currency), 'IDR')})</div>` : ''}
 
               <div class="grid grid-cols-2 gap-2.5 mt-4 pt-3 border-t border-white/20">
                 <button onclick="openTxModal({ defaultType: 'expense', accountId: '${acc.id}', pocketId: '${pkt.id}' })"
-                  class="py-2.5 px-3 rounded-2xl bg-white text-ink text-xs font-extrabold shadow-sm hover:bg-stone-50 active:scale-95 transition-all flex items-center justify-center gap-1.5">
-                  <span>+ Transaksi</span>
-                </button>
+                  class="py-2.5 rounded-2xl bg-white text-ink text-xs font-extrabold shadow-xs">+ Transaksi</button>
                 <button onclick="openTxModal({ defaultType: 'transfer', accountId: '${acc.id}', pocketId: '${pkt.id}' })"
-                  class="py-2.5 px-3 rounded-2xl bg-black/25 text-white text-xs font-extrabold hover:bg-black/35 active:scale-95 transition-all flex items-center justify-center gap-1.5">
-                  <span>⇄ Transfer</span>
-                </button>
+                  class="py-2.5 rounded-2xl bg-black/25 text-white text-xs font-extrabold">⇄ Transfer</button>
               </div>
             </div>
 
-            <!-- Rincian Nominal Per Bulan (Januari - Desember, Sejajar & Rapi) -->
-            <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70">
-              <div class="flex items-center justify-between mb-3">
-                <div>
-                  <h2 class="text-sm font-extrabold text-ink">Rincian Nominal Per Bulan</h2>
-                  <p class="text-[11px] text-slate-400">Ketuk bulan untuk melihat riwayat transaksi bulan tersebut</p>
+            <!-- Rincian Nominal Per Bulan (Jan - Des Sejajar) -->
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <h2 class="text-sm font-extrabold text-ink">Rincian Nominal Per Bulan (${activeYear})</h2>
+                <div class="flex items-center gap-1 bg-creamCard px-2 py-0.5 rounded-xl border border-stone-200 text-xs font-bold">
+                  <button onclick="shiftPeriod('akun', -1)" class="px-1">‹</button>
+                  <span>${activeYear}</span>
+                  <button onclick="shiftPeriod('akun', 1)" class="px-1">›</button>
                 </div>
-                <span class="px-2.5 py-1 rounded-xl bg-creamCard border border-stone-200/80 text-xs font-extrabold text-ink">${ui.akunYear}</span>
               </div>
 
-              <!-- Header Kolom Tabel Sejajar -->
-              <div class="grid grid-cols-12 gap-1 px-2 pb-2 border-b border-stone-200/80 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <div class="col-span-3">Bulan</div>
-                <div class="col-span-3 text-right">Masuk</div>
-                <div class="col-span-3 text-right">Keluar</div>
-                <div class="col-span-3 text-right">Selisih</div>
+              <div class="grid grid-cols-4 text-[10px] font-extrabold text-slate-400 uppercase px-2 pt-1 border-b border-stone-100 pb-1.5">
+                <span>Bulan</span>
+                <span class="text-right">Masuk</span>
+                <span class="text-right">Keluar</span>
+                <span class="text-right">Selisih</span>
               </div>
 
               <div class="divide-y divide-stone-100">
-                ${monthlySummaries.map(ms => {
-                  const isActiveMonth = ms.monthIdx === ui.akunMonth;
+                ${monthlyRows.map(r => {
+                  const isSelected = r.mIdx === activeMonth;
                   return `
-                    <button type="button" onclick="selectPocketMonth(${ms.monthIdx})"
-                      class="w-full grid grid-cols-12 items-center gap-1 px-2 py-2.5 text-[11px] tabular-nums transition-colors text-left rounded-xl ${isActiveMonth ? 'bg-coralLight/70 font-bold' : 'hover:bg-creamCard/80'}">
-                      <span class="col-span-3 font-bold text-ink truncate">${ms.label}</span>
-                      <span class="col-span-3 text-right font-semibold text-sage truncate">+${formatCurrency(ms.masuk, acc.currency)}</span>
-                      <span class="col-span-3 text-right font-semibold text-coral truncate">-${formatCurrency(ms.keluar, acc.currency)}</span>
-                      <span class="col-span-3 text-right font-extrabold truncate ${ms.net >= 0 ? 'text-ink' : 'text-coral'}">
-                        ${ms.net >= 0 ? '+' : ''}${formatCurrency(ms.net, acc.currency)}
-                      </span>
+                    <button onclick="selectPocketDetailMonth(${r.mIdx})"
+                      class="w-full grid grid-cols-4 items-center px-2 py-2.5 text-xs tabular-nums transition-colors rounded-xl ${isSelected ? 'bg-creamCard font-extrabold' : 'hover:bg-stone-50'}">
+                      <span class="text-left text-ink font-bold">${r.mName} ${activeYear}</span>
+                      <span class="text-right text-sage font-semibold">+${formatShortRupiah(r.income)}</span>
+                      <span class="text-right text-coral font-semibold">-${formatShortRupiah(r.expense)}</span>
+                      <span class="text-right font-extrabold text-ink">${r.diff >= 0 ? '+' : ''}${formatShortRupiah(r.diff)}</span>
                     </button>
                   `;
                 }).join('')}
               </div>
             </div>
 
-            <!-- Riwayat Transaksi & Transfer Sesuai Bulan Aktif di Menu Akun -->
+            <!-- Riwayat Transaksi & Transfer Bulan Terpilih -->
             <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70">
-              <div class="flex items-center justify-between gap-2 mb-3">
-                <div>
-                  <h2 class="text-sm font-extrabold text-ink">Riwayat Transaksi & Transfer (${monthlyFilteredTxs.length})</h2>
-                  <p class="text-[11px] text-slate-400">Periode bulan aktif: <strong class="text-ink">${activeMonthLabel}</strong></p>
-                </div>
-                <div class="flex items-center gap-1 bg-cream px-1.5 py-1 rounded-xl border border-stone-200/70 shrink-0">
-                  <button onclick="shiftPeriod('akun', -1)" class="p-1 hover:bg-white rounded-lg text-slate-600" aria-label="Bulan Sebelumnya">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
-                  </button>
-                  <span class="text-[11px] font-bold text-ink min-w-[62px] text-center">${activeMonthLabel}</span>
-                  <button onclick="shiftPeriod('akun', 1)" class="p-1 hover:bg-white rounded-lg text-slate-600" aria-label="Bulan Berikutnya">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
-                  </button>
-                </div>
+              <div class="flex items-center justify-between mb-2">
+                <h2 class="text-sm font-extrabold text-ink">Transaksi & Transfer (${MONTH_NAMES_ID[activeMonth]} ${activeYear})</h2>
+                <span class="text-xs font-bold text-slate-400">${monthTxs.length} item</span>
               </div>
-              ${monthlyFilteredTxs.length === 0 ? `
-                <div class="py-8 text-center text-xs text-slate-400">Belum ada transaksi di pocket ini pada ${activeMonthLabel}.</div>
+              ${monthTxs.length === 0 ? `
+                <div class="py-8 text-center text-xs text-slate-400">Tidak ada transaksi atau transfer pada bulan ${MONTH_NAMES_ID[activeMonth]} ${activeYear}.</div>
               ` : `
                 <div class="divide-y divide-stone-100">
-                  ${monthlyFilteredTxs.map(tx => renderTransactionRow(tx, { accountId, pocketId })).join('')}
+                  ${monthTxs.map(tx => renderTransactionRow(tx, { accountId: acc.id, pocketId: pkt.id })).join('')}
                 </div>
               `}
             </div>
@@ -2040,14 +1911,9 @@
       `;
     }
 
-    function selectPocketMonth(monthIdx) {
-      ui.akunMonth = monthIdx;
-      render();
-    }
-
-    // =========================================================================
+    // -------------------------------------------------------------------------
     // 7. VIEW 3: TRANSAKSI (RIWAYAT LENGKAP, PENCARIAN & FILTER)
-    // =========================================================================
+    // -------------------------------------------------------------------------
     function renderTransaksiView() {
       const searchQ = (ui.txSearch || '').toLowerCase().trim();
       const filtered = db.transactions
@@ -2061,7 +1927,7 @@
           const haystack = [t.title, cat?.name, sub?.name, acc?.name, pkt?.name, t.date].join(' ').toLowerCase();
           return haystack.includes(searchQ);
         })
-        .sort((a, b) => b.date.localeCompare(a.date));
+        .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
       const totalIncome = filtered
         .filter(t => t.type === 'income')
@@ -2072,11 +1938,11 @@
 
       return `
         <div class="p-4 space-y-4">
-          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #FDF0EE; border-color: #F8D0CA;">
+          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #FBDAD5; border-color: #F3B3A9;">
             <div class="flex items-center justify-between">
               <div>
                 <h1 class="text-xl font-extrabold text-ink tracking-tight">Riwayat Transaksi</h1>
-                <p class="text-xs text-slate-600">Semua pemasukan, pengeluaran & transfer antar-pocket</p>
+                <p class="text-xs text-slate-700">Semua pemasukan, pengeluaran & transfer antar-pocket</p>
               </div>
               <button onclick="openTxModal()" class="px-3.5 py-2 rounded-2xl bg-ink text-white text-xs font-bold shadow-sm hover:bg-slate-800">
                 + Catat
@@ -2085,7 +1951,7 @@
 
             <input type="text" value="${ui.txSearch}" oninput="onTxSearchInput(this.value)"
               placeholder="Cari transaksi, kategori, atau nama pocket..."
-              class="w-full px-3.5 py-2.5 rounded-2xl bg-white/90 border border-[#F8D0CA] text-xs font-semibold text-ink focus:outline-none focus:border-ink" />
+              class="w-full px-3.5 py-2.5 rounded-2xl bg-white/95 border border-[#F3B3A9] text-xs font-semibold text-ink focus:outline-none focus:border-ink" />
 
             <div class="flex gap-1.5 overflow-x-auto no-scrollbar">
               ${[
@@ -2224,11 +2090,11 @@
 
       return `
         <div class="p-4 space-y-4">
-          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #FEF8E7; border-color: #FDE68A;">
+          <div class="rounded-3xl p-4 shadow-sm border space-y-3" style="background-color: #FBE9BE; border-color: #F3D082;">
             <div class="flex items-center justify-between">
               <div>
                 <h1 class="text-xl font-extrabold text-ink tracking-tight">Hutang & Piutang</h1>
-                <p class="text-xs text-slate-600">Otomatis menambah/mengurangi saldo akun terkait</p>
+                <p class="text-xs text-slate-700">Otomatis menambah/mengurangi saldo akun terkait</p>
               </div>
               <button onclick="openDebtModal()" class="px-3.5 py-2 rounded-2xl bg-ink text-white text-xs font-bold shadow-sm hover:bg-slate-800">
                 + Catat
@@ -2344,15 +2210,15 @@
 
       return `
         <div class="p-4 space-y-4">
-          <!-- Header Tabungan (Soft Sage / Mint Pastel) -->
-          <div class="rounded-3xl p-4 shadow-sm border flex items-center justify-between gap-2" style="background-color: #E9F6EF; border-color: #BCE3CE;">
+          <!-- Header Tabungan (Medium-Soft Pine/Sage Pastel - Lebih Pekat & Kontras) -->
+          <div class="rounded-3xl p-4 shadow-sm border flex items-center justify-between gap-2" style="background-color: #D0EAD9; border-color: #A4D3B6;">
             <div class="flex items-center gap-3">
-              <div class="w-11 h-11 rounded-2xl bg-white/90 text-sage flex items-center justify-center shrink-0 border border-[#BCE3CE]">
+              <div class="w-11 h-11 rounded-2xl bg-white/95 text-sage flex items-center justify-center shrink-0 border border-[#A4D3B6]">
                 ${ICONS.celengan}
               </div>
               <div>
                 <h1 class="text-xl font-extrabold text-ink tracking-tight">Tabungan</h1>
-                <p class="text-xs text-slate-600">Terhubung ke Akun & masuk dalam Total Aset</p>
+                <p class="text-xs text-slate-700">Terhubung ke Akun & masuk dalam Total Aset</p>
               </div>
             </div>
             <button onclick="openSavingGoalModal()" class="px-3.5 py-2 rounded-2xl bg-sage text-white text-xs font-bold shadow-sm hover:opacity-95 active:scale-95 transition-all shrink-0">
@@ -2360,12 +2226,12 @@
             </button>
           </div>
 
-          <!-- Kartu Ringkasan Total Tabungan (Soft Mint / Sage Pastel) -->
-          <div class="rounded-3xl p-5 shadow-sm border relative overflow-hidden" style="background: linear-gradient(135deg, #E8F6EF 0%, #D7EFE3 100%); border-color: #B6DEC9; color: #1A2433;">
-            <div class="absolute -right-6 -bottom-6 w-28 h-28 rounded-full bg-white/50 pointer-events-none"></div>
+          <!-- Kartu Ringkasan Total Tabungan (Cream-Mint Sangat Lembut agar kontras dengan header atas) -->
+          <div class="rounded-3xl p-5 shadow-sm border relative overflow-hidden" style="background: linear-gradient(135deg, #F3FAF6 0%, #E7F4ED 100%); border-color: #C7E3D2; color: #1A2433;">
+            <div class="absolute -right-6 -bottom-6 w-28 h-28 rounded-full bg-white/60 pointer-events-none"></div>
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-slate-700">Total Tabungan (Bagian dari Aset)</span>
-              <span class="px-2.5 py-0.5 rounded-full bg-white/85 text-[#1F5C42] border border-[#B6DEC9] text-[11px] font-extrabold">${overallPct}% dari Target</span>
+              <span class="px-2.5 py-0.5 rounded-full bg-white text-[#1F5C42] border border-[#C7E3D2] text-[11px] font-extrabold">${overallPct}% dari Target</span>
             </div>
             <div class="text-2xl sm:text-3xl font-extrabold tracking-tight mt-1 text-ink">
               ${formatCurrency(totalSaved)}
@@ -2373,7 +2239,7 @@
             <div class="text-xs text-slate-600 mt-1">
               Target Keseluruhan: <strong class="text-ink">${formatCurrency(totalTarget)}</strong> (${goals.length} celengan)
             </div>
-            <div class="w-full h-2 bg-white/80 rounded-full overflow-hidden mt-3 border border-[#B6DEC9]/70">
+            <div class="w-full h-2 bg-white rounded-full overflow-hidden mt-3 border border-[#C7E3D2]">
               <div class="h-full bg-sage rounded-full transition-all duration-300" style="width: ${overallPct}%"></div>
             </div>
           </div>
@@ -2574,9 +2440,21 @@
 
       return `
         <div class="p-4 space-y-4">
-          <div class="rounded-3xl p-4 shadow-sm border" style="background-color: #FDF2F5; border-color: #F9D8E2;">
+          <div class="rounded-3xl p-4 shadow-sm border" style="background-color: #F7D8E2; border-color: #ECB4C6;">
             <h1 class="text-xl font-extrabold text-ink tracking-tight">Pengaturan</h1>
-            <p class="text-xs text-slate-600">Keamanan PIN/password, kategori, kurs live & backup data</p>
+            <p class="text-xs text-slate-700">Install aplikasi HP, keamanan PIN, kategori, kurs & backup</p>
+          </div>
+
+          <!-- INSTALL SEBAGAI APLIKASI HP (PWA) -->
+          <div class="bg-white rounded-3xl p-4 shadow-sm border border-stone-200/70 flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-base font-extrabold text-ink">Install Aplikasi ke HP</h2>
+              <p class="text-xs text-slate-500">Pasang di layar utama HP agar terbuka layar penuh seperti aplikasi</p>
+            </div>
+            <button onclick="triggerInstallApp()"
+              class="px-3.5 py-2.5 rounded-2xl bg-sage text-white text-xs font-extrabold shadow-xs hover:opacity-95 active:scale-95 transition-all shrink-0">
+              📲 Install App
+            </button>
           </div>
 
           <!-- KUNCI PIN / PASSWORD APLIKASI -->
@@ -2585,11 +2463,11 @@
               <div>
                 <h2 class="text-base font-extrabold text-ink">Kunci PIN / Password</h2>
                 <p class="text-xs text-slate-500">
-                  ${pinActive ? 'Aktif — aplikasi akan meminta PIN/password saat dibuka' : 'Nonaktif — siapa pun yang membuka tautan bisa melihat data'}
+                  ${pinActive ? 'Aktif — tetap terbuka selama dipakai, minta PIN ulang jika >2 hari tidak dibuka' : 'Nonaktif — atur PIN agar otomatis terkunci jika >2 hari tidak dibuka'}
                 </p>
               </div>
               <span class="px-2.5 py-1 rounded-xl text-[10px] font-extrabold ${pinActive ? 'bg-sageLight text-sage' : 'bg-stone-100 text-slate-500'}">
-                ${pinActive ? 'TERKUNCI AKTIF' : 'NONAKTIF'}
+                ${pinActive ? 'AKTIF (2 HARI)' : 'NONAKTIF'}
               </span>
             </div>
 
@@ -4645,9 +4523,23 @@
 
     // Inisialisasi aplikasi & sinkronisasi kurs mata uang asing dari internet saat halaman dimuat
     window.addEventListener('DOMContentLoaded', () => {
+      initPwaSupport();
+      if (db.security?.enabled && db.security?.pinHash && !checkSessionExpiration()) {
+        db.security.lastActiveAt = Date.now();
+        saveData();
+      }
       render();
       updateLockScreenVisibility();
       fetchLiveExchangeRates(true);
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        if (!checkSessionExpiration()) {
+          touchLastActive();
+        }
+        updateLockScreenVisibility();
+      }
     });
   </script>
 </body>
